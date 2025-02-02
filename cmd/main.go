@@ -4,8 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 
+	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/lazeratops/optimusdime/src/converter/exchangeapi"
 	"github.com/lazeratops/optimusdime/src/document"
 	"github.com/lazeratops/optimusdime/src/importer"
@@ -13,9 +15,16 @@ import (
 	"github.com/lazeratops/optimusdime/src/parser"
 )
 
+const resultsBanner = `
+╔═══════════════════════════════════════════════════════╗
+║                  CONVERSION RESULTS                   ║
+╚═══════════════════════════════════════════════════════╝
+`
+
 func main() {
 	csvPath := flag.String("statement", "", "Path to CSV file of bank statement")
 	openaiApiKey := flag.String("oai_key", "", "OpenAI API Key")
+	targetCurrency := flag.String("target_currenct", "SEK", "Target currency")
 
 	flag.Parse()
 
@@ -40,36 +49,41 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("OLD DOC")
-
-	fmt.Println(doc)
 	converterApi, err := exchangeapi.NewExchangeApi("")
 	if err != nil {
 		log.Fatal(err)
 	}
-	convertedDoc, failedDoc, err := converterApi.Convert(document.SEK, doc)
+	convertedDoc, failedDoc, err := converterApi.Convert(document.Currency(*targetCurrency), doc)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fileName := filepath.Base(*csvPath)
-	fmt.Println("CONVERTED DOC")
-	fmt.Println(convertedDoc)
-	err = convertedDoc.SaveToCSV(fmt.Sprintf("convered_%s", fileName))
-	if err != nil {
-		log.Fatal(err)
-	}
-	err = failedDoc.SaveToCSV(fmt.Sprintf("failed_%s", fileName))
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println("RESULTS:")
-	log.Printf("\nTotal original transactions: %d", len(doc.Transactions))
 
+	successFilename := fmt.Sprintf("convered_%s", fileName)
+	failedFilename := fmt.Sprintf("failed_%s", fileName)
+	err = convertedDoc.SaveToCSV(successFilename)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = failedDoc.SaveToCSV(failedFilename)
+	if err != nil {
+		log.Fatal(err)
+	}
+	println(resultsBanner)
+	println(fmt.Sprintf("Target Currency: %s", *targetCurrency))
+	println(fmt.Sprintf("- %s", successFilename))
+	println(fmt.Sprintf("- %s", failedFilename))
+	println()
 	lSuccess := len(convertedDoc.Transactions)
 	lFail := len(failedDoc.Transactions)
-	log.Printf("\nTotal processed transactions: %d", lSuccess+lFail)
 
-	log.Printf("\nSuccessfully converted: %d", lSuccess)
-	log.Printf("\nFailed conversion: %d", lFail)
-
+	t := table.NewWriter()
+	t.SetOutputMirror(os.Stdout)
+	t.AppendHeader(table.Row{"Total Transactions", "Total Processed", "Succeeded #", "Failed #"})
+	t.AppendRows([]table.Row{
+		{len(doc.Transactions), lSuccess + lFail, lSuccess, lFail},
+	})
+	t.AppendSeparator()
+	t.SetStyle(table.StyleBold)
+	t.Render()
 }
