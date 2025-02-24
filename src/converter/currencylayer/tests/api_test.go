@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/lazeratops/optimusdime/src/converter"
-	"github.com/lazeratops/optimusdime/src/converter/exchangeapi"
+	"github.com/lazeratops/optimusdime/src/converter/currencylayer"
 	"github.com/lazeratops/optimusdime/src/document"
 
 	"github.com/stretchr/testify/require"
@@ -21,6 +21,7 @@ func TestConvert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse date: %v", err)
 	}
+	dateUnix := date_20250101.Unix()
 
 	cases := []struct {
 		name           string
@@ -40,7 +41,7 @@ func TestConvert(t *testing.T) {
 						Description: "transaction1",
 						Currency:    document.SEK,
 						Amount:      100,
-						Date:        time.Now(),
+						Date:        date_20250101,
 					},
 				},
 			},
@@ -50,14 +51,19 @@ func TestConvert(t *testing.T) {
 		{
 			name:          "success",
 			apiStatusCode: http.StatusOK,
-			// This example body was retrieved from the ReleasePopulator API docs
+			// Updated to match CurrencyLayer API response format
 			apiBody: fmt.Sprintf(`{
-				"date": "%s",
-				"eur": {
-					"sek": 11.24233239,
-					"usd": 1.08854773
+				"success": true,
+				"terms": "https://currencylayer.com/terms",
+				"privacy": "https://currencylayer.com/privacy",
+				"historical": true,
+				"date": "%d",
+				"source": "USD",
+				"quotes": {
+                    "USDSEK": 11.24233239,
+                    "USDEUR": 1.0
 				}
-			}`, dateStr),
+			}`, dateUnix),
 			sourceDocument: &document.Document{
 				Transactions: []document.Transaction{
 					{
@@ -87,6 +93,11 @@ func TestConvert(t *testing.T) {
 			t.Parallel()
 
 			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Verify request parameters
+				require.Contains(t, r.URL.String(), "access_key=some-key")
+				require.Contains(t, r.URL.String(), "date="+dateStr)
+				require.Contains(t, r.URL.String(), "currencies=")
+
 				w.WriteHeader(tc.apiStatusCode)
 				_, err := w.Write([]byte(tc.apiBody))
 				require.NoError(t, err)
@@ -94,13 +105,14 @@ func TestConvert(t *testing.T) {
 
 			defer testServer.Close()
 
-			api, err := exchangeapi.NewExchangeApi(testServer.URL)
+			api, err := currencylayer.NewCurrencyLayer(testServer.URL, "some-key")
 			require.NoError(t, err)
 
-			gotDoc, _, gotErr := api.Convert(tc.targetCurrency, tc.sourceDocument)
+			gotDoc, failedDoc, gotErr := api.Convert(tc.targetCurrency, tc.sourceDocument)
 			require.ErrorIs(t, gotErr, tc.wantErr)
 			if gotErr == nil {
 				require.EqualValues(t, tc.wantDocument, gotDoc)
+				require.Empty(t, failedDoc.Transactions)
 			}
 		})
 	}

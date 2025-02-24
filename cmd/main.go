@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/lazeratops/optimusdime/src/converter/currencylayer"
 	"github.com/lazeratops/optimusdime/src/converter/exchangeapi"
 	"github.com/lazeratops/optimusdime/src/document"
 	"github.com/lazeratops/optimusdime/src/importer"
@@ -25,6 +26,7 @@ func main() {
 	csvPath := flag.String("statement", "", "Path to CSV file of bank statement")
 	openaiApiKey := flag.String("oai_key", "", "OpenAI API Key")
 	targetCurrency := flag.String("target_currenct", "SEK", "Target currency")
+	currencyLayerApiKey := flag.String("currencylayer_key", "", "CurrencyLayer API Key")
 
 	flag.Parse()
 
@@ -33,6 +35,15 @@ func main() {
 	}
 	if *openaiApiKey == "" {
 		log.Fatal("Please provide an OpenAI API key using the -oai_key flag")
+	}
+
+	var clApi *currencylayer.Api
+	var err error
+	if currencyLayerApiKey != nil {
+		clApi, err = currencylayer.NewCurrencyLayer("", *currencyLayerApiKey)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	llm, err := llm.NewOpenAi(llm.Config{
@@ -53,10 +64,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	convertedDoc, failedDoc, err := converterApi.Convert(document.Currency(*targetCurrency), doc)
+
+	tc := document.Currency(*targetCurrency)
+	convertedDoc, failedDoc, err := converterApi.Convert(tc, doc)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if failedDoc.Transactions != nil && clApi != nil {
+		convertedDoc2, failedConvertedDoc2, err := clApi.Convert(tc, failedDoc)
+		if err != nil {
+			log.Fatal(err)
+		}
+		convertedDoc.Transactions = append(convertedDoc.Transactions, convertedDoc2.Transactions...)
+		failedDoc.Transactions = append(failedDoc.Transactions, failedConvertedDoc2.Transactions...)
+	}
+
 	fileName := filepath.Base(*csvPath)
 
 	successFilename := fmt.Sprintf("convered_%s", fileName)

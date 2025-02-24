@@ -1,4 +1,4 @@
-package exchangeapi
+package currencylayer
 
 import (
 	"encoding/json"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,17 +16,18 @@ import (
 	"github.com/lazeratops/optimusdime/src/document"
 )
 
-const (
-	//exchangeApiUrl         = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/"
-	defaultApiUrl = "currency-api.pages.dev/v1/currencies"
-)
+const defaultApiUrl = "api.currencylayer.com/historical"
 
 type Api struct {
+	apiKey string
 	url    string
 	schema string
 }
 
-func NewExchangeApi(apiUrl string) (*Api, error) {
+func NewCurrencyLayer(apiUrl string, apiKey string) (*Api, error) {
+	if apiKey == "" {
+		return nil, fmt.Errorf("API key must be provided for CurrencyLayer API")
+	}
 	var schema string
 	if apiUrl == "" {
 		apiUrl = defaultApiUrl
@@ -46,20 +48,8 @@ func NewExchangeApi(apiUrl string) (*Api, error) {
 	return &Api{
 		url:    apiUrl,
 		schema: schema,
+		apiKey: apiKey,
 	}, nil
-}
-
-func (api *Api) getUrl(date time.Time, targetCurrency document.Currency) string {
-	dateStr := date.Format("2006-01-02")
-	c := string(targetCurrency)
-	if c == "" {
-		return ""
-	}
-	lower := strings.ToLower(c)
-	if api.url != defaultApiUrl {
-		return fmt.Sprintf("%s://%s/%s.json", api.schema, api.url, lower)
-	}
-	return fmt.Sprintf("%s://%s.%s/%s.json", api.schema, dateStr, api.url, lower)
 }
 
 func (api *Api) Convert(targetCurrency document.Currency, statement *document.Document) (*document.Document, *document.Document, error) {
@@ -75,22 +65,31 @@ func (api *Api) Convert(targetCurrency document.Currency, statement *document.Do
 		Transactions: []document.Transaction{},
 	}
 
-	sourceCurrenciesForDate := make(map[time.Time][]document.Transaction)
+	type dateCurrenciesTransactions struct {
+		currencies   []document.Currency
+		transactions []document.Transaction
+	}
+
+	sourceCurrenciesForDate := make(map[time.Time]dateCurrenciesTransactions)
 
 	for _, oldTransaction := range statement.Transactions {
-		sourceCurrenciesForDate[oldTransaction.Date] = append(sourceCurrenciesForDate[oldTransaction.Date], oldTransaction)
+		sourceCurrenciesForDate[oldTransaction.Date] = dateCurrenciesTransactions{
+			transactions: append(sourceCurrenciesForDate[oldTransaction.Date].transactions, oldTransaction),
+			currencies:   append(sourceCurrenciesForDate[oldTransaction.Date].currencies, oldTransaction.Currency),
+		}
 	}
 
 	var lastError error
-	for date, transactions := range sourceCurrenciesForDate {
+	for date, v := range sourceCurrenciesForDate {
 		c := document.Currency(targetCurrency)
-		url := api.getUrl(date, c)
+		url := api.getUrl()
 		if url == "" {
 			return nil, nil, fmt.Errorf("failed to get api URL for date %v and currency %v", date, c)
 		}
-		resBody, err := api.fetch(url)
+		v.currencies = append(v.currencies, targetCurrency)
+		resBody, err := api.fetch(url, v.currencies, date)
 		if err != nil {
-			failedToConvertDoc.Transactions = append(failedToConvertDoc.Transactions, transactions...)
+			failedToConvertDoc.Transactions = append(failedToConvertDoc.Transactions, v.transactions...)
 			log.Printf("\n Failed to fetch transactions from URL: %s: %v", url, err)
 			lastError = err
 			continue
@@ -98,31 +97,26 @@ func (api *Api) Convert(targetCurrency document.Currency, statement *document.Do
 
 		var currencyRes ApiResponse
 		if err := json.Unmarshal(resBody, &currencyRes); err != nil {
-			failedToConvertDoc.Transactions = append(failedToConvertDoc.Transactions, transactions...)
+			failedToConvertDoc.Transactions = append(failedToConvertDoc.Transactions, v.transactions...)
 			log.Printf("\n Failed to parse currency response from URL: %s: %v", url, err)
 			lastError = err
 			continue
 		}
 
-		sTargetCurrency := strings.ToLower(string(targetCurrency))
-		rates, ok := currencyRes.Rates[strings.ToLower(sTargetCurrency)]
-		if !ok {
-			failedToConvertDoc.Transactions = append(failedToConvertDoc.Transactions, transactions...)
-			log.Printf("\n Failed to get currency rates for target currenct from URL: %s: %v", url, err)
-			lastError = err
-			continue
+		if currencyRes.Source != document.USD {
+			return nil, nil, fmt.Errorf("unexpected currency response from CurrencyLayer. Expected USD source, got %s", currencyRes.Source)
 		}
 
-		for _, oldTransaction := range transactions {
-			sSourceCurrency := strings.ToLower(string(oldTransaction.Currency))
-			rate, ok := rates[sSourceCurrency]
-			if !ok {
+		for _, oldTransaction := range v.transactions {
+			rate, err := currencyRes.getCrossRate(oldTransaction.Currency, targetCurrency)
+			if err != nil {
 				failedToConvertDoc.Transactions = append(failedToConvertDoc.Transactions, oldTransaction)
-				log.Printf("\n Failed to get currency rates for transaction %s: %v", oldTransaction.Description, err)
-				lastError = err
+				log.Printf("\nFailed to get cross rate for %s to %s: %v", oldTransaction.Currency, targetCurrency, err)
 				continue
 			}
-			convertedAmount := oldTransaction.Amount / rate
+
+			convertedAmount := oldTransaction.Amount * rate
+			convertedAmount = math.Round(convertedAmount*100) / 100
 
 			transaction := &document.Transaction{
 				Description: oldTransaction.Description,
@@ -134,13 +128,38 @@ func (api *Api) Convert(targetCurrency document.Currency, statement *document.Do
 		}
 	}
 	if len(newDoc.Transactions) == 0 && lastError != nil {
-		return nil, nil, lastError
+		return nil, &failedToConvertDoc, lastError
 	}
 	return &newDoc, &failedToConvertDoc, nil
 }
 
-func (api *Api) fetch(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+func (api *Api) getUrl() string {
+	return fmt.Sprintf("%s://%s", api.schema, api.url)
+}
+
+func (api *Api) fetch(apiUrl string, currencies []document.Currency, date time.Time) ([]byte, error) {
+	// Create base URL
+	baseURL, err := url.Parse(apiUrl)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CurrencyLayer API URL: %w", err)
+	}
+
+	params := baseURL.Query()
+	params.Add("access_key", api.apiKey)
+	params.Add("date", date.Format("2006-01-02"))
+
+	if len(currencies) > 0 {
+		currencyStrs := make([]string, len(currencies))
+		for i, c := range currencies {
+			currencyStrs[i] = string(c)
+		}
+		params.Add("currencies", strings.Join(currencyStrs, ","))
+	}
+
+	baseURL.RawQuery = params.Encode()
+
+	// Make the request
+	resp, err := http.Get(baseURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch data: %w", err)
 	}

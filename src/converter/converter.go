@@ -5,5 +5,5 @@ import (
 )
 
 type Converter interface {
-	Convert(targetCurrency document.Currency, statement *document.Document) (*document.Document, error)
+	Convert(targetCurrency document.Currency, statement *document.Document) (*document.Document, *document.Document, error)
 }

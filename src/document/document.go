@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,10 @@ const (
 	SEK Currency = "SEK"
 	EUR Currency = "EUR"
 )
+
+func (c Currency) String() string {
+	return strings.ToUpper(string(c))
+}
 
 type Document struct {
 	Transactions []Transaction `json:"transactions" jsonschema_description:"All bank transactions in the document"`
